@@ -138,7 +138,8 @@ class FedtoaServer(FedavgServer):
 
         c = topo_mean.shape[0]
         default_topk = max((c * (c - 1)) // 2, 1)
-        topk_edges = int(getattr(self.args, "topk_edges", default_topk))
+        raw_topk = getattr(self.args, "topk_edges", None)
+        topk_edges = default_topk if raw_topk is None else int(raw_topk)
         var_threshold = getattr(self.args, "fedtoa_var_threshold", None)
 
         confidence_mask = build_confidence_mask(
