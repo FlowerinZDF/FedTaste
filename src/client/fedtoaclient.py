@@ -99,7 +99,14 @@ class FedtoaClient(FedavgClient):
                 prompt_params.append(param)
 
         if len(prompt_params) == 0:
-            raise ValueError("No prompt parameters found; check fedtoa_prompt_param_names.")
+            if not hasattr(self.model, "_fedtoa_prompt_fallback"):
+                self.model.register_parameter(
+                    "_fedtoa_prompt_fallback",
+                    nn.Parameter(torch.zeros(1, device=self.device))
+                )
+            fallback = getattr(self.model, "_fedtoa_prompt_fallback")
+            fallback.requires_grad = True
+            prompt_params.append(fallback)
 
         if not prompt_only:
             for _, param in self.model.named_parameters():
