@@ -64,12 +64,19 @@ python main.py \
   --goal $goal \
   --equal_sampled \
   --eval_batch_size 512 \
+  --fedtoa_prompt_only \
+  --freeze_backbone \
   --use_topo \
   --use_spec \
   --use_lip \
   --tau 0.2 \
   --eig_k 4 \
+  --topk_edges 2048 \
+  --fedtoa_var_threshold 0.5 \
   --beta_topo 1.0 \
+  --fedtoa_topo_warmup_rounds 5 \
+  --fedtoa_topo_warmup_start_beta 0.05 \
+  --fedtoa_topo_warmup_mode linear \
   --gamma_spec 1.0 \
   --eta_lip 1.0 \
   --prompt_len 10 \

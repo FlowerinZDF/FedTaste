@@ -336,3 +336,71 @@ def test_local_train_student_txt_retrieval_batch_uses_text_field():
     assert metrics[1]["task_loss"] == 0.0
     assert "total_loss" in metrics[1]
     assert torch.allclose(client.model.last_missing, torch.zeros_like(img_feats[:2]))
+
+
+def test_local_train_student_reports_warmup_beta_and_topology_metrics():
+    _install_client_import_stubs()
+    from client.fedtoaclient import FedtoaClient
+
+    args = _build_args()
+    args.beta_topo = 1.0
+    args.fedtoa_comm_round = 2
+    args.fedtoa_topo_warmup_rounds = 4
+    args.fedtoa_topo_warmup_start_beta = 0.2
+
+    feats = torch.tensor(
+        [[1.0, 0.0, 0.0, 0.0], [0.9, 0.1, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.9, 0.1, 0.0]],
+        dtype=torch.float32,
+    )
+    labels = torch.tensor([0, 0, 1, 1], dtype=torch.long)
+    ds = TensorDataset(feats, labels)
+
+    client = FedtoaClient(args=args, training_set=ds, test_set=ds, modality="img", task="cls", eval_metrics=[])
+    client.id = 17
+    client.device = "cpu"
+    client.model = TinyPromptModel()
+    client.set_global_blueprint(
+        GlobalTopologyBlueprint(
+            topology_mean=torch.zeros(3, 3),
+            topology_mask=torch.ones(3, 3, dtype=torch.bool),
+            spectral_global=torch.zeros(2),
+            active_classes=torch.tensor([True, True, False]),
+        )
+    )
+
+    metrics = client.local_train_student(epochs=1)[1]
+    assert pytest.approx(metrics["effective_beta_topo"], rel=1e-6) == 0.6
+    assert "active_edge_count" in metrics
+    assert "scaled_topo_term" in metrics
+
+
+def test_upload_keeps_non_prompt_state_unchanged_in_prompt_only_mode():
+    _install_client_import_stubs()
+    from client.fedtoaclient import FedtoaClient
+
+    feats = torch.tensor(
+        [[1.0, 0.0, 0.0, 0.0], [0.9, 0.1, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.9, 0.1, 0.0]],
+        dtype=torch.float32,
+    )
+    labels = torch.tensor([0, 0, 1, 1], dtype=torch.long)
+    ds = TensorDataset(feats, labels)
+
+    client = FedtoaClient(args=_build_args(), training_set=ds, test_set=ds, modality="img", task="cls", eval_metrics=[])
+    client.id = 18
+    client.device = "cpu"
+    client.model = TinyPromptModel()
+    client.set_global_blueprint(
+        GlobalTopologyBlueprint(
+            topology_mean=torch.zeros(3, 3),
+            topology_mask=torch.ones(3, 3, dtype=torch.bool),
+            spectral_global=torch.zeros(2),
+            active_classes=torch.tensor([True, True, False]),
+        )
+    )
+
+    before = {k: v.detach().clone() for k, v in client.model.state_dict().items()}
+    client.local_train_student(epochs=1)
+    upload_sd = client.upload()
+
+    assert torch.allclose(upload_sd["backbone.weight"], before["backbone.weight"])
+    assert torch.allclose(upload_sd["head.weight"], before["head.weight"])
