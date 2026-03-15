@@ -198,12 +198,35 @@ class FedtoaServer(FedavgServer):
             var_threshold=var_threshold,
         )
 
-        return build_global_blueprint(
+        retained_edges = int(torch.triu(confidence_mask, diagonal=1).sum().item())
+        max_edges = max((c * (c - 1)) // 2, 1)
+        retained_density = float(retained_edges / max_edges)
+        logger.info(
+            "[FEDTOA][BLUEPRINT] round=%s teachers=%s topk_edges=%s retained_edges=%s retained_density=%.6f var_threshold_active=%s var_threshold=%s",
+            str(self.round).zfill(4),
+            len(payloads),
+            topk_edges,
+            retained_edges,
+            retained_density,
+            var_threshold is not None,
+            var_threshold,
+        )
+
+        blueprint = build_global_blueprint(
             topo_mean=topo_mean,
             confidence_mask=confidence_mask,
             spectral_list=spectral_list,
             class_masks=class_masks,
         )
+        self.results[self.round]["fedtoa_blueprint"] = {
+            "teacher_payloads": len(payloads),
+            "topk_edges": int(topk_edges),
+            "retained_edges": retained_edges,
+            "retained_edge_density": retained_density,
+            "var_threshold": None if var_threshold is None else float(var_threshold),
+            "var_threshold_active": bool(var_threshold is not None),
+        }
+        return blueprint
 
     def _run_student_updates(self, student_ids: List[int], blueprint):
         update_sizes = {}
@@ -214,6 +237,7 @@ class FedtoaServer(FedavgServer):
             resolved_modality = self._bind_resolved_client_modality(client_id)
             self._prepare_client_for_round(client)
             self._align_client_model_layout(client, resolved_modality)
+            client.args.fedtoa_comm_round = int(self.round)
             client.set_global_blueprint(blueprint)
             update_results[client_id] = client.local_train_student(getattr(client.args, "E", 1))
             update_sizes[client_id] = len(client.training_set)

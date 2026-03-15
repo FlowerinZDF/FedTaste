@@ -236,6 +236,12 @@ if __name__ == "__main__":
     parser.add_argument('--fedtoa_teacher_ids', type=int, nargs='+', default=None, help='optional explicit teacher client ids for FedToA rounds')
     parser.add_argument('--fedtoa_group_count', type=int, default=None, help='optional number of local groups/classes used to build FedToA topology')
     parser.add_argument('--fedtoa_var_threshold', type=float, default=None, help='optional edge variance threshold for FedToA confidence masking')
+    _add_bool_optional_arg(parser, '--fedtoa_prompt_only', default=True, help_text='restrict FedToA student optimization to prompt/MASP params only')
+    _add_bool_optional_arg(parser, '--freeze_backbone', default=True, help_text='freeze backbone params during FedToA student optimization')
+    parser.add_argument('--fedtoa_prompt_param_names', type=str, nargs='+', default=['prompt'], help='name tokens used to select FedToA prompt/MASP parameters')
+    parser.add_argument('--fedtoa_topo_warmup_rounds', type=int, default=5, help='communication rounds for beta_topo warmup; <=0 disables warmup')
+    parser.add_argument('--fedtoa_topo_warmup_start_beta', type=float, default=0.0, help='initial beta_topo used at round 0 during FedToA warmup')
+    parser.add_argument('--fedtoa_topo_warmup_mode', type=str, default='linear', choices=['linear'], help='FedToA topology warmup schedule mode')
 
 
 

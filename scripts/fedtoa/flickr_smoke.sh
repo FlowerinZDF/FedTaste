@@ -59,6 +59,12 @@ python main.py \
   --reduce_test_samples 32 \
   --eval_batch_size 64 \
   --fedavg_eval \
+  --fedtoa_prompt_only \
+  --freeze_backbone \
   --use_topo \
   --use_spec \
-  --use_lip
+  --use_lip \
+  --topk_edges 64 \
+  --fedtoa_topo_warmup_rounds 2 \
+  --fedtoa_topo_warmup_start_beta 0.05 \
+  --fedtoa_topo_warmup_mode linear

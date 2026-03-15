@@ -1,4 +1,5 @@
-from typing import List, Optional, Tuple
+import logging
+from typing import Dict, List, Optional, Tuple
 import warnings
 
 import torch
@@ -21,6 +22,9 @@ from src.methods.fedtoa.topology import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 class FedtoaClient(FedavgClient):
     """FedToA client with student-side local adaptation support.
 
@@ -34,6 +38,7 @@ class FedtoaClient(FedavgClient):
         super().__init__(**kwargs)
         self.global_blueprint: Optional[GlobalTopologyBlueprint] = None
         self._fedtoa_warned_missing_task_target = False
+        self._fedtoa_upload_base_state: Optional[Dict[str, torch.Tensor]] = None
 
     def _num_classes(self) -> int:
         if self.global_blueprint is not None:
@@ -115,7 +120,26 @@ class FedtoaClient(FedavgClient):
                 if not (freeze_backbone and not param.requires_grad):
                     param.requires_grad = True
 
+        self._fedtoa_prompt_trainable_names = tuple(
+            name for name, _ in self.model.named_parameters() if any(token in name for token in prompt_tokens)
+        )
+
         return prompt_params
+
+    def _effective_beta_topo(self) -> float:
+        target_beta = float(getattr(self.args, "beta_topo", 1.0))
+        warmup_rounds = int(getattr(self.args, "fedtoa_topo_warmup_rounds", 0))
+        start_beta = float(getattr(self.args, "fedtoa_topo_warmup_start_beta", 0.0))
+        warmup_mode = str(getattr(self.args, "fedtoa_topo_warmup_mode", "linear")).lower()
+        comm_round = int(getattr(self.args, "fedtoa_comm_round", 0))
+
+        if warmup_rounds <= 0 or comm_round >= warmup_rounds:
+            return target_beta
+        if warmup_mode != "linear":
+            raise ValueError(f"Unsupported fedtoa_topo_warmup_mode={warmup_mode}.")
+
+        progress = max(float(comm_round), 0.0) / max(float(warmup_rounds), 1.0)
+        return start_beta + (target_beta - start_beta) * progress
 
     def _student_forward(self, batch):
         targets: Optional[torch.Tensor] = None
@@ -256,13 +280,18 @@ class FedtoaClient(FedavgClient):
 
         self.model.train()
         self.model.to(self.device)
+        self._fedtoa_upload_base_state = {
+            name: tensor.detach().cpu().clone() for name, tensor in self.model.state_dict().items()
+        }
 
         prompt_params = self._configure_trainable_params()
         trainable_params = [p for p in self.model.parameters() if p.requires_grad]
-        optimizer = self.optim(trainable_params, **self._refine_optim_args(self.args))
+        prompt_only = bool(getattr(self.args, "fedtoa_prompt_only", True))
+        optimizer_params = prompt_params if prompt_only else trainable_params
+        optimizer = self.optim(optimizer_params, **self._refine_optim_args(self.args))
 
         criterion = self.criterion()
-        beta = float(getattr(self.args, "beta_topo", 1.0))
+        beta_effective = self._effective_beta_topo()
         gamma = float(getattr(self.args, "gamma_spec", 1.0))
         eta = float(getattr(self.args, "eta_lip", 1.0))
         tau = float(getattr(self.args, "tau", 0.2))
@@ -276,6 +305,22 @@ class FedtoaClient(FedavgClient):
         last_metrics = {}
         num_classes = self._num_classes()
         fallback_group_offset = 0
+        trainable_named = [name for name, param in self.model.named_parameters() if param.requires_grad]
+        trainable_count = sum(param.numel() for param in self.model.parameters() if param.requires_grad)
+        prompt_count = sum(param.numel() for param in prompt_params)
+        backbone_frozen = len(trainable_named) == len(self._fedtoa_prompt_trainable_names)
+        logger.info(
+            "[FEDTOA][CLIENT %s] student prompt-only=%s freeze_backbone=%s backbone_frozen=%s trainable_params=%s trainable_elems=%s prompt_elems=%s effective_beta_topo=%.6f round=%s",
+            self.id,
+            prompt_only,
+            bool(getattr(self.args, "freeze_backbone", True)),
+            backbone_frozen,
+            trainable_named,
+            trainable_count,
+            prompt_count,
+            beta_effective,
+            int(getattr(self.args, "fedtoa_comm_round", 0)),
+        )
 
         for _ in range(epochs):
             for batch in self.train_loader:
@@ -321,7 +366,14 @@ class FedtoaClient(FedavgClient):
                 support_mask = local_support & active_classes
 
                 topo_loss = task_loss.new_tensor(0.0)
+                active_edge_count = 0
                 if use_topo:
+                    valid_edges = (
+                        self.global_blueprint.topology_mask.to(self.device).to(dtype=torch.bool)
+                        & support_mask.unsqueeze(0)
+                        & support_mask.unsqueeze(1)
+                    )
+                    active_edge_count = int(valid_edges.sum().item())
                     topo_loss = masked_topology_loss(
                         local_topology=local_topology,
                         global_topology=self.global_blueprint.topology_mean.to(self.device),
@@ -345,7 +397,7 @@ class FedtoaClient(FedavgClient):
                     topo_loss=topo_loss,
                     spec_loss=spec_loss,
                     lip_loss=lip_loss,
-                    beta=beta,
+                    beta=beta_effective,
                     gamma=gamma,
                     eta=eta,
                 )
@@ -357,7 +409,11 @@ class FedtoaClient(FedavgClient):
 
                 last_metrics = {
                     "task_loss": float(task_loss.detach().cpu()),
-                    "topo_loss": float(topo_loss.detach().cpu()),
+                    "topo_loss_raw": float(topo_loss.detach().cpu()),
+                    "topo_loss_used": float(topo_loss.detach().cpu()),
+                    "active_edge_count": active_edge_count,
+                    "effective_beta_topo": float(beta_effective),
+                    "scaled_topo_term": float((beta_effective * topo_loss).detach().cpu()),
                     "spec_loss": float(spec_loss.detach().cpu()),
                     "lip_loss": float(lip_loss.detach().cpu()),
                     "total_loss": float(total_loss.detach().cpu()),
@@ -367,7 +423,11 @@ class FedtoaClient(FedavgClient):
         loss_value = float(last_metrics.get("total_loss", 0.0))
         metric_payload = {
             "task_loss": float(last_metrics.get("task_loss", 0.0)),
-            "topo_loss": float(last_metrics.get("topo_loss", 0.0)),
+            "topo_loss_raw": float(last_metrics.get("topo_loss_raw", 0.0)),
+            "topo_loss_used": float(last_metrics.get("topo_loss_used", 0.0)),
+            "active_edge_count": int(last_metrics.get("active_edge_count", 0)),
+            "effective_beta_topo": float(last_metrics.get("effective_beta_topo", beta_effective)),
+            "scaled_topo_term": float(last_metrics.get("scaled_topo_term", 0.0)),
             "spec_loss": float(last_metrics.get("spec_loss", 0.0)),
             "lip_loss": float(last_metrics.get("lip_loss", 0.0)),
             "total_loss": loss_value,
@@ -376,7 +436,12 @@ class FedtoaClient(FedavgClient):
             final_epoch: {
                 "loss": loss_value,
                 "task_loss": metric_payload["task_loss"],
-                "topo_loss": metric_payload["topo_loss"],
+                "topo_loss": metric_payload["topo_loss_used"],
+                "topo_loss_raw": metric_payload["topo_loss_raw"],
+                "topo_loss_used": metric_payload["topo_loss_used"],
+                "active_edge_count": metric_payload["active_edge_count"],
+                "effective_beta_topo": metric_payload["effective_beta_topo"],
+                "scaled_topo_term": metric_payload["scaled_topo_term"],
                 "spec_loss": metric_payload["spec_loss"],
                 "lip_loss": metric_payload["lip_loss"],
                 "total_loss": metric_payload["total_loss"],
@@ -389,3 +454,17 @@ class FedtoaClient(FedavgClient):
 
     def update(self):
         return self.local_train_student(getattr(self.args, "E", 1))
+
+    def upload(self):
+        sd = super().upload()
+        prompt_only = bool(getattr(self.args, "fedtoa_prompt_only", True))
+        if not prompt_only or self._fedtoa_upload_base_state is None:
+            return sd
+
+        prompt_tokens = self._prompt_name_tokens()
+        for key in sd.keys():
+            if any(token in key for token in prompt_tokens):
+                continue
+            if key in self._fedtoa_upload_base_state:
+                sd[key] = self._fedtoa_upload_base_state[key].clone()
+        return sd
