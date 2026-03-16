@@ -184,10 +184,11 @@ class FedtoaClient(FedavgClient):
         lightweight_fallback_names: List[str] = []
         if len(prompt_params) == 0 and active_modality_index is not None:
             for candidate_name in (
-                "norm.weight",
-                "norm.bias",
+                f"embeddings.{active_modality_index}.cls_token",
                 f"heads.{active_modality_index}.head.weight",
                 f"heads.{active_modality_index}.head.bias",
+                "norm.weight",
+                "norm.bias",
             ):
                 param = dict(self.model.named_parameters()).get(candidate_name)
                 if param is None:
@@ -246,6 +247,62 @@ class FedtoaClient(FedavgClient):
             "lip_loss_requires_grad": bool(lip_loss.requires_grad),
             "total_loss_requires_grad": bool(total_loss.requires_grad),
             "total_loss_grad_fn": str(total_loss.grad_fn),
+        }
+
+    @staticmethod
+    def _groupwise_contrastive_task_loss(feats: torch.Tensor, group_ids: torch.Tensor, temperature: float = 0.07) -> torch.Tensor:
+        """Group-supervised contrastive fallback task loss.
+
+        Args:
+            feats: Tensor[B, D] active-branch normalized features.
+            group_ids: Tensor[B] group/class ids.
+            temperature: Logit temperature for pairwise similarity.
+
+        Returns:
+            Scalar contrastive loss with gradient path to ``feats``.
+        """
+
+        if feats.ndim != 2 or feats.shape[0] <= 1:
+            return feats.sum() * 0.0
+
+        group_ids = group_ids.to(device=feats.device, dtype=torch.long)
+        feats = torch.nn.functional.normalize(feats, dim=-1)
+        logits = torch.matmul(feats, feats.transpose(0, 1)) / max(float(temperature), 1e-6)
+        logits = logits - logits.max(dim=1, keepdim=True).values
+
+        eye_mask = torch.eye(logits.shape[0], dtype=torch.bool, device=logits.device)
+        positive_mask = (group_ids.unsqueeze(0) == group_ids.unsqueeze(1)) & (~eye_mask)
+        valid_anchor_mask = positive_mask.any(dim=1)
+        if not bool(valid_anchor_mask.any()):
+            return feats.sum() * 0.0
+
+        logits = logits.masked_fill(eye_mask, float("-inf"))
+        log_prob = logits - torch.logsumexp(logits, dim=1, keepdim=True)
+        pos_counts = positive_mask.sum(dim=1).clamp_min(1).to(dtype=feats.dtype)
+        per_anchor = -(positive_mask.to(dtype=feats.dtype) * log_prob).sum(dim=1) / pos_counts
+        return per_anchor[valid_anchor_mask].mean()
+
+    def _task_path_diagnostics(self, task_loss: torch.Tensor, selected_names: List[str], active_modality_index: Optional[int]) -> Dict[str, object]:
+        selected_lookup = {name: p for name, p in self.model.named_parameters() if name in set(selected_names)}
+        selected_connected: List[str] = []
+        if task_loss.requires_grad and len(selected_lookup) > 0:
+            grad_inputs = [p for p in selected_lookup.values() if p.requires_grad]
+            grad_names = [n for n, p in selected_lookup.items() if p.requires_grad]
+            if len(grad_inputs) > 0:
+                grads = torch.autograd.grad(task_loss, grad_inputs, retain_graph=True, allow_unused=True)
+                selected_connected = [name for name, grad in zip(grad_names, grads) if grad is not None]
+
+        active_head_prefix = None if active_modality_index is None else f"heads.{active_modality_index}."
+        active_head_names = []
+        active_head_selected = []
+        if active_head_prefix is not None:
+            active_head_names = [name for name, _ in self.model.named_parameters() if name.startswith(active_head_prefix)]
+            active_head_selected = [name for name in selected_names if name.startswith(active_head_prefix)]
+
+        return {
+            "task_connected_selected": selected_connected,
+            "active_head_param_count": len(active_head_names),
+            "active_head_selected": active_head_selected,
         }
 
     def _effective_beta_topo(self) -> float:
@@ -461,17 +518,6 @@ class FedtoaClient(FedavgClient):
                 optimizer.zero_grad()
                 logits, feats, targets = self._student_forward(batch)
 
-                if targets is None:
-                    task_loss = logits.new_tensor(0.0)
-                    if not self._fedtoa_warned_missing_task_target:
-                        warnings.warn(
-                            "FedToA student task targets unavailable in current batch; using zero task loss for smoke execution.",
-                            RuntimeWarning,
-                        )
-                        self._fedtoa_warned_missing_task_target = True
-                else:
-                    task_loss = criterion(logits.to(targets.device), targets)
-
                 topology_groups, topology_group_source = self._resolve_topology_groups(batch, batch_size=feats.shape[0], device=feats.device)
                 if topology_groups is None:
                     if targets is not None:
@@ -488,6 +534,17 @@ class FedtoaClient(FedavgClient):
                         fallback_group_offset += feats.shape[0]
                 raw_topology_groups = topology_groups
                 topology_groups = self._map_groups_to_table(topology_groups, num_classes)
+
+                if targets is None:
+                    task_loss = self._groupwise_contrastive_task_loss(feats=feats, group_ids=topology_groups)
+                    if not self._fedtoa_warned_missing_task_target:
+                        warnings.warn(
+                            "FedToA student task targets unavailable in current batch; using group-wise contrastive fallback task loss.",
+                            RuntimeWarning,
+                        )
+                        self._fedtoa_warned_missing_task_target = True
+                else:
+                    task_loss = criterion(logits.to(targets.device), targets)
 
                 local_proto, local_support = compute_class_prototypes(
                     feats,
@@ -602,6 +659,21 @@ class FedtoaClient(FedavgClient):
                     grad_diag["lip_loss_requires_grad"],
                     grad_diag["total_loss_requires_grad"],
                     grad_diag["total_loss_grad_fn"],
+                )
+                active_modality_index = 0 if self.modality == "img" else 1 if self.modality == "txt" else None
+                task_path_diag = self._task_path_diagnostics(
+                    task_loss=task_loss,
+                    selected_names=list(getattr(self, "_fedtoa_prompt_trainable_names", ())),
+                    active_modality_index=active_modality_index,
+                )
+                logger.info(
+                    "[FEDTOA][TASK_PATH] client=%s round=%s task_requires_grad=%s task_connected_selected=%s active_head_param_count=%s active_head_selected=%s",
+                    self.id,
+                    int(getattr(self.args, "fedtoa_comm_round", 0)),
+                    grad_diag["task_loss_requires_grad"],
+                    task_path_diag["task_connected_selected"],
+                    task_path_diag["active_head_param_count"],
+                    task_path_diag["active_head_selected"],
                 )
 
                 if not total_loss.requires_grad:
