@@ -60,16 +60,39 @@ class FedtoaServer(FedavgServer):
                 total += int(tensor.numel() * tensor.element_size())
         return total
 
-    def _estimate_round_comm_bytes(self, teacher_payloads, blueprint, student_ids) -> dict:
+    @staticmethod
+    def _extract_last_loss(update_result) -> Optional[float]:
+        if not isinstance(update_result, dict) or len(update_result) == 0:
+            return None
+        try:
+            final_epoch = max(update_result.keys())
+            payload = update_result.get(final_epoch, {})
+            if isinstance(payload, dict) and "loss" in payload:
+                return float(payload["loss"])
+        except Exception:
+            return None
+        return None
+
+    def _estimate_round_comm_bytes(self, teacher_payloads, blueprint, teacher_ids, student_ids) -> dict:
         """Approximate FedToA communication in bytes for diagnostics.
 
         Estimation includes:
-        - teacher upload payload bytes
+        - teacher upload model bytes
+        - teacher upload topology payload bytes
         - student upload model state bytes after local update
         - server blueprint broadcast bytes to all students
         """
 
-        teacher_upload = sum(self._payload_bytes(payload) for payload in teacher_payloads)
+        teacher_model_upload = 0
+        teacher_per_client_upload = {}
+        for client_id in teacher_ids:
+            client = self.clients[client_id]
+            state_dict = client.upload()
+            upload_bytes = self._state_dict_bytes(state_dict)
+            teacher_model_upload += upload_bytes
+            teacher_per_client_upload[int(client_id)] = int(upload_bytes)
+
+        teacher_topology_upload = sum(self._payload_bytes(payload) for payload in teacher_payloads)
         student_upload = 0
         student_prompt_upload = 0
         student_shadow_bytes = 0
@@ -104,11 +127,13 @@ class FedtoaServer(FedavgServer):
             + self._tensor_bytes(blueprint.active_classes)
         )
         server_broadcast = int(blueprint_bytes * len(student_ids))
-        total_round = int(teacher_upload + student_upload + server_broadcast)
+        total_round = int(teacher_model_upload + teacher_topology_upload + student_upload + server_broadcast)
 
         return {
+            "teachers": teacher_per_client_upload,
             "students": per_client_upload,
-            "teacher_payload": int(teacher_upload),
+            "teacher_model_upload": int(teacher_model_upload),
+            "teacher_topology_payload": int(teacher_topology_upload),
             "student_upload": int(student_upload),
             "student_prompt_upload": int(student_prompt_upload),
             "student_shadow_bytes": int(student_shadow_bytes),
@@ -241,16 +266,36 @@ class FedtoaServer(FedavgServer):
             expected_layout,
         )
 
-    def _collect_teacher_payloads(self, teacher_ids: List[int]):
+    def _run_teacher_updates_and_collect_payloads(self, teacher_ids: List[int]):
         payloads = []
+        update_sizes = {}
+        update_results = {}
         for client_id in teacher_ids:
             client = self.clients[client_id]
             resolved_modality = self._bind_resolved_client_modality(client_id)
             self._prepare_client_for_round(client)
             self._align_client_model_layout(client, resolved_modality)
+            client.args.fedtoa_comm_round = int(self.round)
+            update_result = client.update()
+            update_results[client_id] = update_result
+            update_sizes[client_id] = len(client.training_set)
+            logger.info(
+                "[FEDTOA][TEACHER_UPDATE] round=%s client=%s modality=%s local_training_ran=%s last_teacher_loss=%s",
+                str(self.round).zfill(4),
+                client_id,
+                resolved_modality,
+                True,
+                self._extract_last_loss(update_result),
+            )
             payload = client.extract_teacher_topology()
+            logger.info(
+                "[FEDTOA][TEACHER_BLUEPRINT_SOURCE] round=%s client=%s extracted_after_local_training=%s",
+                str(self.round).zfill(4),
+                client_id,
+                True,
+            )
             payloads.append(payload)
-        return payloads
+        return payloads, update_sizes, update_results
 
     def _aggregate_teacher_blueprint(self, payloads):
         if len(payloads) == 0:
@@ -396,19 +441,28 @@ class FedtoaServer(FedavgServer):
         )
 
         blueprint = None
-        if len(teacher_ids) > 0 and len(student_ids) > 0:
-            payloads = self._collect_teacher_payloads(teacher_ids)
+        if len(teacher_ids) > 0:
+            payloads, teacher_update_sizes, teacher_update_results = self._run_teacher_updates_and_collect_payloads(teacher_ids)
             blueprint = self._aggregate_teacher_blueprint(payloads)
             self.latest_blueprint = blueprint
-            student_update_sizes = self._run_student_updates(student_ids, blueprint)
-            comm = self._estimate_round_comm_bytes(payloads, blueprint, student_ids)
+            student_update_sizes = self._run_student_updates(student_ids, blueprint) if len(student_ids) > 0 else {}
+            comm = self._estimate_round_comm_bytes(payloads, blueprint, teacher_ids, student_ids)
             cumulative = int(self.results[self.round - 1].get("fedtoa_comm", {}).get("cumulative_total", 0)) if self.round > 0 else 0
             comm["cumulative_total"] = int(cumulative + comm["round_total"])
             self.results[self.round]["fedtoa_comm"] = comm
+            if len(teacher_update_sizes) > 0:
+                self.results[self.round]["fedtoa_teacher_clients_updated"] = self._log_results(
+                    teacher_update_sizes,
+                    teacher_update_results,
+                    eval=False,
+                    participated=True,
+                    save_raw=False,
+                )
             logger.info(
-                "[FEDTOA][COMM] round=%s teacher_payload_bytes=%s student_upload_bytes=%s student_prompt_upload_bytes=%s student_shadow_bytes=%s server_broadcast_bytes=%s round_total_bytes=%s cumulative_total_bytes=%s",
+                "[FEDTOA][COMM] round=%s teacher_model_upload_bytes=%s teacher_topology_payload_bytes=%s student_upload_bytes=%s student_prompt_upload_bytes=%s student_shadow_bytes=%s server_broadcast_bytes=%s round_total_bytes=%s cumulative_total_bytes=%s",
                 str(self.round).zfill(4),
-                comm["teacher_payload"],
+                comm["teacher_model_upload"],
+                comm["teacher_topology_payload"],
                 comm["student_upload"],
                 comm.get("student_prompt_upload", 0),
                 comm.get("student_shadow_bytes", 0),
@@ -426,6 +480,13 @@ class FedtoaServer(FedavgServer):
                     client_comm.get("uploaded_param_bytes", 0),
                     client_comm.get("shadow_param_bytes", 0),
                 )
+            for client_id, uploaded_bytes in comm.get("teachers", {}).items():
+                logger.info(
+                    "[FEDTOA][COMM][TEACHER] round=%s client=%s model_upload_bytes=%s",
+                    str(self.round).zfill(4),
+                    client_id,
+                    uploaded_bytes,
+                )
         else:
             logger.warning(
                 "[FEDTOA] Round %s skipped FedToA orchestration because teachers=%s students=%s.",
@@ -434,7 +495,8 @@ class FedtoaServer(FedavgServer):
                 len(student_ids),
             )
             student_update_sizes = {}
-            self.results[self.round]["fedtoa_comm"] = {"students": {}, "teacher_payload": 0, "student_upload": 0, "student_prompt_upload": 0, "student_shadow_bytes": 0, "server_broadcast": 0, "round_total": 0, "cumulative_total": int(self.results[self.round - 1].get("fedtoa_comm", {}).get("cumulative_total", 0)) if self.round > 0 else 0}
+            teacher_update_sizes = {}
+            self.results[self.round]["fedtoa_comm"] = {"teachers": {}, "students": {}, "teacher_model_upload": 0, "teacher_topology_payload": 0, "student_upload": 0, "student_prompt_upload": 0, "student_shadow_bytes": 0, "server_broadcast": 0, "round_total": 0, "cumulative_total": int(self.results[self.round - 1].get("fedtoa_comm", {}).get("cumulative_total", 0)) if self.round > 0 else 0}
 
         if self.args.fedavg_eval and len(student_ids) > 0 and len(student_update_sizes) > 0:
             old_models = deepcopy(self.global_models)
@@ -451,6 +513,17 @@ class FedtoaServer(FedavgServer):
             # main.py via server.evaluate(...).
             self.global_models = old_models
 
+        teacher_updates_included = bool(len(teacher_ids) > 0 and len(teacher_update_sizes) > 0)
+        if teacher_updates_included:
+            for i, dataset in enumerate(self.global_models.keys()):
+                self.global_model = self.global_models[dataset]
+                self.task = DATASET_2_TASK[dataset]
+                self.modality = DATASET_2_MODALITY[dataset]
+                self.dataset = dataset
+                self.out_modality_scale = self.args.out_modality_scales[i]
+                self._aggregate(teacher_ids, teacher_update_sizes)
+                self.global_models[dataset] = self.global_model
+
         if len(student_ids) > 0 and len(student_update_sizes) > 0:
             for i, dataset in enumerate(self.global_models.keys()):
                 self.global_model = self.global_models[dataset]
@@ -460,6 +533,13 @@ class FedtoaServer(FedavgServer):
                 self.out_modality_scale = self.args.out_modality_scales[i]
                 self._aggregate(student_ids, student_update_sizes)
                 self.global_models[dataset] = self.global_model
+        logger.info(
+            "[FEDTOA][AGGREGATE] round=%s teacher_ids_aggregated=%s student_ids_aggregated=%s teacher_updates_included=%s",
+            str(self.round).zfill(4),
+            teacher_ids if teacher_updates_included else [],
+            student_ids if len(student_update_sizes) > 0 else [],
+            teacher_updates_included,
+        )
 
         if self.round % self.args.lr_decay_step == 0:
             self.curr_lr *= self.args.lr_decay
