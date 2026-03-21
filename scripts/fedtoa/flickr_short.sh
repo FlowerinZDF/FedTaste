@@ -21,13 +21,13 @@ b="${BATCH_SIZE:-128}"
 rounds="${ROUNDS:-3}"
 local_epochs="${LOCAL_EPOCHS:-1}"
 
-beta_topo="${BETA_TOPO:-0.2}"
+beta_topo="${BETA_TOPO:-0.15}"
 gamma_spec="${GAMMA_SPEC:-0.0}"
 eta_lip="${ETA_LIP:-0.0}"
 warmup_rounds="${WARMUP_ROUNDS:-5}"
 warmup_start_beta="${WARMUP_START_BETA:-0.0}"
 warmup_mode="${WARMUP_MODE:-linear}"
-topk_edges="${TOPK_EDGES:-2048}"
+topk_edges="${TOPK_EDGES:-1024}"
 var_threshold="${FEDTOA_VAR_THRESHOLD:-0.5}"
 
 fedtoa_prepare_paths "$out_dir" "$log_file"
@@ -101,8 +101,12 @@ python main.py \
   --fedtoa_topo_warmup_mode "$warmup_mode" \
   --gamma_spec "$gamma_spec" \
   --eta_lip "$eta_lip" \
+  --fedtoa_student_objective "${FEDTOA_STUDENT_OBJECTIVE:-retrieval_only}" \
   --fedtoa_retrieval_task_weight "${FEDTOA_RETRIEVAL_TASK_WEIGHT:-1.0}" \
-  --fedtoa_aux_task_weight "${FEDTOA_AUX_TASK_WEIGHT:-0.2}" \
+  --fedtoa_aux_task_weight "${FEDTOA_AUX_TASK_WEIGHT:-0.0}" \
+  --fedtoa_topo_min_active_edges "${FEDTOA_TOPO_MIN_ACTIVE_EDGES:-8}" \
+  --fedtoa_topo_loss_cap "${FEDTOA_TOPO_LOSS_CAP:-1.0}" \
+  --fedtoa_topo_task_ratio_cap "${FEDTOA_TOPO_TASK_RATIO_CAP:-0.25}" \
   --prompt_len 10 \
   --diagonal_eps 1e-4 \
   2>&1 | tee "$log_file"
