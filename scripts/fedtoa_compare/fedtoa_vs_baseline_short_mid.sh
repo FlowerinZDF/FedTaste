@@ -6,8 +6,8 @@ source "${SCRIPT_DIR}/../fedtoa/common.sh"
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 
-run_level="${RUN_LEVEL:-short}"   # short | mid
-dataset="${DATASET:-flickr}"      # flickr | coco
+run_level="${RUN_LEVEL:-mid}"      # short | mid
+dataset="${DATASET:-flickr}"       # flickr | coco
 
 goal="${GOAL:-FedToA-vs-FedCola}"
 root="${DATA_ROOT_PREFIX:-}"
@@ -31,8 +31,7 @@ case "$run_level" in
     local_epochs="${LOCAL_EPOCHS:-1}"
     ;;
   mid)
-    # 不要默认 10x2，先用稳妥中跑
-    rounds="${ROUNDS:-5}"
+    rounds="${ROUNDS:-10}"
     local_epochs="${LOCAL_EPOCHS:-1}"
     ;;
   *)
@@ -62,15 +61,18 @@ case "$dataset" in
     ;;
 esac
 
-# 采用你现在已经相对稳定的 FedToA 默认值
-beta_topo="${BETA_TOPO:-1e-4}"
-gamma_spec="${GAMMA_SPEC:-1.0}"
+# FedToA practical defaults for "beat baseline first"
+beta_topo="${BETA_TOPO:-0.2}"
+gamma_spec="${GAMMA_SPEC:-0.0}"
 eta_lip="${ETA_LIP:-0.0}"
 warmup_rounds="${WARMUP_ROUNDS:-5}"
 warmup_start_beta="${WARMUP_START_BETA:-0.0}"
 warmup_mode="${WARMUP_MODE:-linear}"
 topk_edges="${TOPK_EDGES:-512}"
-var_threshold="${FEDTOA_VAR_THRESHOLD:-0.5}"
+var_threshold="${FEDTOA_VAR_THRESHOLD:-none}"
+
+retrieval_w="${FEDTOA_RETRIEVAL_TASK_WEIGHT:-1.0}"
+aux_w="${FEDTOA_AUX_TASK_WEIGHT:-0.2}"
 
 mkdir -p "$out_root" "$log_root"
 ts="$(fedtoa_ts)"
@@ -202,8 +204,8 @@ fedtoa_cmd=(
   --fedtoa_prompt_only
   --freeze_backbone
   --use_topo
-  --use_spec
-  --use_lip
+  --no-use_spec
+  --no-use_lip
   --tau 0.2
   --eig_k 4
   --topk_edges "$topk_edges"
@@ -213,11 +215,12 @@ fedtoa_cmd=(
   --fedtoa_topo_warmup_mode "$warmup_mode"
   --gamma_spec "$gamma_spec"
   --eta_lip "$eta_lip"
+  --fedtoa_retrieval_task_weight "$retrieval_w"
+  --fedtoa_aux_task_weight "$aux_w"
   --prompt_len 10
   --diagonal_eps 1e-4
 )
 
-# 只有在 var_threshold 不是 none / empty 时才传
 if [[ -n "${var_threshold}" && "${var_threshold}" != "none" && "${var_threshold}" != "None" ]]; then
   fedtoa_cmd+=(--fedtoa_var_threshold "$var_threshold")
 fi
