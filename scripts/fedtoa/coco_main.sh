@@ -62,9 +62,13 @@ python main.py \
   --tau 0.2 \
   --eig_k 4 \
   --beta_topo 0.2 \
+  --fedtoa_student_objective retrieval_only \
   --gamma_spec 0.0 \
   --eta_lip 0.0 \
   --fedtoa_retrieval_task_weight 1.0 \
-  --fedtoa_aux_task_weight 0.2 \
+  --fedtoa_aux_task_weight 0.0 \
+  --fedtoa_topo_min_active_edges 8 \
+  --fedtoa_topo_loss_cap 1.0 \
+  --fedtoa_topo_task_ratio_cap 0.25 \
   --prompt_len 10 \
   --diagonal_eps 1e-4

@@ -8,8 +8,8 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 
 goal="${GOAL:-YourGoal}"
 root="${DATA_ROOT_PREFIX:-}"
-out_dir="${FEDTOA_OUT_DIR:-outputs/fedtoa/coco_short}"
-log_file="${FEDTOA_LOG_FILE:-logs/fedtoa/coco_short_$(fedtoa_ts).log}"
+out_dir="${FEDTOA_OUT_DIR:-outputs/fedtoa/coco_mid}"
+log_file="${FEDTOA_LOG_FILE:-logs/fedtoa/coco_mid_$(fedtoa_ts).log}"
 
 ic="${IC:-12}"
 tc="${TC:-12}"
@@ -18,8 +18,8 @@ cncntrtn="${CNCNTRTN:-0.5}"
 c="${C_RATIO:-0.25}"
 nt="${NUM_THREAD:-8}"
 b="${BATCH_SIZE:-112}"
-rounds="${ROUNDS:-3}"
-local_epochs="${LOCAL_EPOCHS:-1}"
+rounds="${ROUNDS:-12}"
+local_epochs="${LOCAL_EPOCHS:-2}"
 
 beta_topo="${BETA_TOPO:-0.15}"
 gamma_spec="${GAMMA_SPEC:-0.0}"
@@ -33,12 +33,12 @@ var_threshold="${FEDTOA_VAR_THRESHOLD:-0.5}"
 fedtoa_prepare_paths "$out_dir" "$log_file"
 
 fedtoa_print_run_config \
-  "coco_short.sh" "MS-COCO" "fedtoa" "$beta_topo" "$gamma_spec" "$eta_lip" \
+  "coco_mid.sh" "MS-COCO" "fedtoa" "$beta_topo" "$gamma_spec" "$eta_lip" \
   "$warmup_rounds" "$warmup_start_beta" "$warmup_mode" "true" "true" "$topk_edges" "$var_threshold" \
   "$out_dir" "$log_file"
 
 echo "[PRECHECK] output directory ready: ${out_dir}"
-echo "[PRECHECK] dataset/algorithm/script identity: MS-COCO / fedtoa / coco_short.sh"
+echo "[PRECHECK] dataset/algorithm/script identity: MS-COCO / fedtoa / coco_mid.sh"
 
 python main.py \
   --exp_name FedToA \

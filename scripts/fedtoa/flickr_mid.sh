@@ -8,8 +8,8 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 
 goal="${GOAL:-YourGoal}"
 root="${DATA_ROOT_PREFIX:-}"
-out_dir="${FEDTOA_OUT_DIR:-outputs/fedtoa/coco_short}"
-log_file="${FEDTOA_LOG_FILE:-logs/fedtoa/coco_short_$(fedtoa_ts).log}"
+out_dir="${FEDTOA_OUT_DIR:-outputs/fedtoa/flickr_mid}"
+log_file="${FEDTOA_LOG_FILE:-logs/fedtoa/flickr_mid_$(fedtoa_ts).log}"
 
 ic="${IC:-12}"
 tc="${TC:-12}"
@@ -17,9 +17,9 @@ mc="${MC:-8}"
 cncntrtn="${CNCNTRTN:-0.5}"
 c="${C_RATIO:-0.25}"
 nt="${NUM_THREAD:-8}"
-b="${BATCH_SIZE:-112}"
-rounds="${ROUNDS:-3}"
-local_epochs="${LOCAL_EPOCHS:-1}"
+b="${BATCH_SIZE:-128}"
+rounds="${ROUNDS:-12}"
+local_epochs="${LOCAL_EPOCHS:-2}"
 
 beta_topo="${BETA_TOPO:-0.15}"
 gamma_spec="${GAMMA_SPEC:-0.0}"
@@ -33,12 +33,12 @@ var_threshold="${FEDTOA_VAR_THRESHOLD:-0.5}"
 fedtoa_prepare_paths "$out_dir" "$log_file"
 
 fedtoa_print_run_config \
-  "coco_short.sh" "MS-COCO" "fedtoa" "$beta_topo" "$gamma_spec" "$eta_lip" \
+  "flickr_mid.sh" "Flickr30k" "fedtoa" "$beta_topo" "$gamma_spec" "$eta_lip" \
   "$warmup_rounds" "$warmup_start_beta" "$warmup_mode" "true" "true" "$topk_edges" "$var_threshold" \
   "$out_dir" "$log_file"
 
 echo "[PRECHECK] output directory ready: ${out_dir}"
-echo "[PRECHECK] dataset/algorithm/script identity: MS-COCO / fedtoa / coco_short.sh"
+echo "[PRECHECK] dataset/algorithm/script identity: Flickr30k / fedtoa / flickr_mid.sh"
 
 python main.py \
   --exp_name FedToA \
@@ -53,9 +53,9 @@ python main.py \
   --algorithm fedtoa \
   --seed "${SEED:-1}" \
   --multi-task \
-  --datasets CIFAR100 AG_NEWS Coco Coco \
+  --datasets CIFAR100 AG_NEWS Flickr30k Coco \
   --modalities img txt img+txt img+txt \
-  --data_paths "${root}data/cifar100" "${root}data/agnews" "${root}data/coco" "${root}data/coco" \
+  --data_paths "${root}data/cifar100" "${root}data/agnews" "${root}data/flickr30k" "${root}data/coco" \
   --Ks "$ic" "$tc" "$mc" \
   --Cs "$c" \
   --test_size -1 \
